@@ -58,6 +58,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [feedback, setFeedback] = useState({}); // For temporary button feedback
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -139,7 +140,7 @@ export default function App() {
   };
 
   const handleSearch = async (query) => {
-    if (!query || query.length < 3) {
+    if (!query || query.length < 2) {
         setSearchResults([]);
         return;
     }
@@ -166,16 +167,18 @@ export default function App() {
         setIsSearching(false);
     }
   };
-
+  
+  // Debounced search effect
   useEffect(() => {
     if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current);
     }
     searchTimeoutRef.current = setTimeout(() => {
         handleSearch(searchQuery);
-    }, 500); // Debounce search by 500ms
+    }, 300); // 300ms debounce
     return () => clearTimeout(searchTimeoutRef.current);
   }, [searchQuery]);
+
 
   const triggerDetailFetch = async (movieId, movieTitle) => {
     setProcessingIds(prev => new Set(prev).add(movieId));
@@ -199,47 +202,74 @@ export default function App() {
   };
 
   // --- Firestore Actions ---
-  const handleAddMovie = async (title, watched = false) => {
+  const handleAddMovie = async (title, status, imdbID = null) => {
     if (!title.trim() || !db || !userId) return;
-    if (movies.some(movie => movie.title.toLowerCase() === title.toLowerCase())) {
-        setError(`"${title}" is already in your list.`);
-        setTimeout(() => setError(null), 3000);
-        return;
-    }
+    
+    const existingMovie = movies.find(movie => movie.title.toLowerCase() === title.toLowerCase());
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const moviesCollectionPath = `artifacts/${appId}/users/${userId}/movies`;
-    try {
-      const docRef = await addDoc(collection(db, moviesCollectionPath), { 
-        title: title.trim(), 
-        watched,
-        createdAt: serverTimestamp() 
-      });
-      if (watched) {
-        triggerDetailFetch(docRef.id, title.trim());
-      }
-    } catch (err) {
-      console.error("Error adding movie:", err);
+
+    if (existingMovie) {
+        const updateData = {};
+        if (status === 'watched') updateData.watched = true;
+        if (status === 'to-watch') updateData.onWatchlist = true;
+        
+        const movieDocPath = `artifacts/${appId}/users/${userId}/movies/${existingMovie.id}`;
+        await updateDoc(doc(db, movieDocPath), updateData);
+    } else {
+        const moviesCollectionPath = `artifacts/${appId}/users/${userId}/movies`;
+        const newData = {
+            title: title.trim(),
+            watched: status === 'watched',
+            onWatchlist: status === 'to-watch',
+            createdAt: serverTimestamp()
+        };
+        try {
+          const docRef = await addDoc(collection(db, moviesCollectionPath), newData);
+          triggerDetailFetch(docRef.id, title.trim());
+        } catch (err) {
+          console.error("Error adding movie:", err);
+        }
+    }
+
+    if (imdbID) {
+        setFeedback({ id: imdbID, type: status });
+        setTimeout(() => setFeedback({}), 2000);
     }
   };
 
-  const handleRemoveMovie = async (id) => {
+  const handleRemoveFromList = async (id) => {
     if (!db || !userId) return;
+    const movie = movies.find(m => m.id === id);
+    if (!movie) return;
+
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const movieDocPath = `artifacts/${appId}/users/${userId}/movies/${id}`;
-    await deleteDoc(doc(db, movieDocPath));
+
+    if (activeTab === 'to-watch') {
+      if (movie.watched) {
+        await updateDoc(doc(db, movieDocPath), { onWatchlist: false });
+      } else {
+        await deleteDoc(doc(db, movieDocPath));
+      }
+    } else if (activeTab === 'watched') {
+      if (movie.onWatchlist) {
+        await updateDoc(doc(db, movieDocPath), { watched: false });
+      } else {
+        await deleteDoc(doc(db, movieDocPath));
+      }
+    }
   };
   
-  const handleToggleWatched = async (id, movieTitle, currentStatus) => {
+  const handleToggleStatus = async (id, movieTitle, currentStatus) => {
     if (!db || !userId) return;
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const movieDocPath = `artifacts/${appId}/users/${userId}/movies/${id}`;
     const movieIsNowWatched = !currentStatus;
     await updateDoc(doc(db, movieDocPath), { watched: movieIsNowWatched });
-    if (movieIsNowWatched) {
-        const movie = movies.find(m => m.id === id);
-        if (movie && !movie.description && !movie.posterUrl) {
-            triggerDetailFetch(id, movieTitle);
-        }
+    
+    const movie = movies.find(m => m.id === id);
+    if (movie && !movie.description && !movie.posterUrl) {
+        triggerDetailFetch(id, movieTitle);
     }
   };
 
@@ -300,7 +330,7 @@ export default function App() {
   };
 
   const moviesToDisplay = movies.filter(movie => {
-    if (activeTab === 'to-watch') return !movie.watched;
+    if (activeTab === 'to-watch') return movie.onWatchlist;
     if (activeTab === 'watched') return movie.watched;
     return false;
   });
@@ -336,38 +366,29 @@ export default function App() {
                 {activeTab === 'search' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                         {isSearching ? <div className="col-span-full flex justify-center items-center h-full"><LoadingSpinner/></div> :
-                         searchResults.length > 0 ? searchResults.map(movie => (
-                            <div key={movie.imdbID} className="bg-gray-700/60 rounded-lg overflow-hidden animate-fade-in">
-                                <div className="aspect-w-2 aspect-h-3 bg-gray-800 flex items-center justify-center">
-                                    {movie.Poster !== "N/A" ? <img src={movie.Poster} alt={movie.Title} className="w-full h-full object-cover"/> : <Icon path={ICONS.FILM} className="w-10 h-10 text-gray-600"/>}
-                                </div>
-                                <div className="p-2">
-                                    <h4 className="font-bold text-sm truncate">{movie.Title}</h4>
-                                    <p className="text-xs text-gray-400">{movie.Year}</p>
-                                    <div className="flex flex-col gap-1 mt-2">
-                                        <button onClick={() => handleAddMovie(movie.Title, true)} className="text-xs bg-green-600 text-white font-semibold py-1 px-1 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1"><Icon path={ICONS.CHECK} className="w-3 h-3"/> Watched</button>
-                                        <button onClick={() => handleAddMovie(movie.Title, false)} className="text-xs bg-indigo-600 text-white font-semibold py-1 px-1 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1"><Icon path={ICONS.PLUS} className="w-3 h-3"/> To Watch</button>
+                         searchResults.length > 0 ? searchResults.map(movie => {
+                            const isAddedToWatched = feedback.id === movie.imdbID && feedback.type === 'watched';
+                            const isAddedToWatchlist = feedback.id === movie.imdbID && feedback.type === 'to-watch';
+                            return (
+                                <div key={movie.imdbID} className="bg-gray-700/60 rounded-lg overflow-hidden animate-fade-in">
+                                    <div className="aspect-w-2 aspect-h-3 bg-gray-800 flex items-center justify-center">
+                                        {movie.Poster !== "N/A" ? <img src={movie.Poster} alt={movie.Title} className="w-full h-full object-cover"/> : <Icon path={ICONS.FILM} className="w-10 h-10 text-gray-600"/>}
+                                    </div>
+                                    <div className="p-2">
+                                        <h4 className="font-bold text-sm truncate">{movie.Title}</h4>
+                                        <p className="text-xs text-gray-400">{movie.Year}</p>
+                                        <div className="flex flex-col gap-1 mt-2">
+                                            <button onClick={() => handleAddMovie(movie.Title, 'watched', movie.imdbID)} className={`text-xs font-semibold py-1 px-1 rounded-md transition flex items-center justify-center gap-1 ${isAddedToWatched ? 'bg-red-600' : 'bg-green-600 hover:bg-green-500'}`}><Icon path={ICONS.CHECK} className="w-3 h-3"/> {isAddedToWatched ? 'Added!' : 'Watched'}</button>
+                                            <button onClick={() => handleAddMovie(movie.Title, 'to-watch', movie.imdbID)} className={`text-xs font-semibold py-1 px-1 rounded-md transition flex items-center justify-center gap-1 ${isAddedToWatchlist ? 'bg-red-600' : 'bg-indigo-600 hover:bg-indigo-500'}`}><Icon path={ICONS.PLUS} className="w-3 h-3"/> {isAddedToWatchlist ? 'Added!' : 'To Watch'}</button>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                         )) : <div className="col-span-full text-center text-gray-500 pt-32">Search for movies to add them to your lists.</div>
+                            )
+                         }) : <div className="col-span-full text-center text-gray-500 pt-32">Search for movies to add them to your lists.</div>
                         }
                     </div>
                 )}
-                {activeTab === 'to-watch' && (
-                    <div className="space-y-2">
-                        {moviesToDisplay.length > 0 ? moviesToDisplay.map(movie => (
-                            <div key={movie.id} className="flex items-center justify-between bg-gray-700/80 p-3 rounded-lg animate-fade-in">
-                                <div className="flex items-center truncate">
-                                    <input type="checkbox" checked={!!movie.watched} onChange={() => handleToggleWatched(movie.id, movie.title, movie.watched)} className="h-5 w-5 rounded bg-gray-600 border-gray-500 text-indigo-500 focus:ring-indigo-600 mr-3 cursor-pointer" />
-                                    <span className="truncate">{movie.title}</span>
-                                </div>
-                                <button onClick={() => handleRemoveMovie(movie.id)} className="text-gray-400 hover:text-red-500 transition ml-2"><Icon path={ICONS.TRASH} className="w-5 h-5" /></button>
-                            </div>
-                        )) : <div className="text-center text-gray-500 pt-32">Your watchlist is empty!</div>}
-                    </div>
-                )}
-                {activeTab === 'watched' && (
+                {activeTab !== 'search' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                         {moviesToDisplay.length > 0 ? moviesToDisplay.map(movie => (
                             <div key={movie.id} className="bg-gray-700/60 rounded-lg overflow-hidden animate-fade-in group relative">
@@ -378,10 +399,10 @@ export default function App() {
                                     <h4 className="font-bold text-sm">{movie.title}</h4>
                                     <p className="text-xs text-gray-300 leading-tight mt-1">{movie.description || '...'}</p>
                                 </div>
-                                <button onClick={() => handleToggleWatched(movie.id, movie.title, movie.watched)} className="absolute top-1 left-1 bg-indigo-600 p-1 rounded-full text-white"><Icon path={ICONS.CHECK} className="w-3 h-3"/></button>
-                                <button onClick={() => handleRemoveMovie(movie.id)} className="absolute top-1 right-1 bg-red-600 p-1 rounded-full text-white"><Icon path={ICONS.TRASH} className="w-3 h-3"/></button>
+                                <button onClick={() => handleToggleStatus(movie.id, activeTab === 'watched' ? 'onWatchlist' : 'watched')} className="absolute top-1 left-1 bg-indigo-600 p-1 rounded-full text-white"><Icon path={activeTab === 'watched' ? ICONS.PLUS : ICONS.CHECK} className="w-3 h-3"/></button>
+                                <button onClick={() => handleRemoveFromList(movie.id)} className="absolute top-1 right-1 bg-red-600 p-1 rounded-full text-white"><Icon path={ICONS.TRASH} className="w-3 h-3"/></button>
                             </div>
-                        )) : <div className="col-span-full text-center text-gray-500 pt-32">No movies marked as watched.</div>}
+                        )) : <div className="col-span-full text-center text-gray-500 pt-32">{activeTab === 'to-watch' ? 'Your watchlist is empty!' : 'No movies marked as watched.'}</div>}
                     </div>
                 )}
             </div>
@@ -416,10 +437,10 @@ export default function App() {
                             <h4 className="font-bold text-white truncate">{rec.title}</h4>
                             <p className="text-xs text-gray-400 h-16 overflow-hidden mt-1">{rec.description}</p>
                             <div className="flex flex-col gap-2 mt-3">
-                                <button onClick={() => handleAddMovie(rec.title, true)} className="text-xs bg-green-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1">
+                                <button onClick={() => handleAddMovie(rec.title, 'watched')} className="text-xs bg-green-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1">
                                     <Icon path={ICONS.CHECK} className="w-4 h-4"/> Watched
                                 </button>
-                                <button onClick={() => handleAddMovie(rec.title, false)} className="text-xs bg-indigo-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1">
+                                <button onClick={() => handleAddMovie(rec.title, 'to-watch')} className="text-xs bg-indigo-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1">
                                     <Icon path={ICONS.PLUS} className="w-4 h-4"/> Add to List
                                 </button>
                             </div>
