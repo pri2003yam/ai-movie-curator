@@ -33,6 +33,7 @@ const ICONS = {
   SPARKLES: "M10.89 2.11a1.5 1.5 0 00-1.78 0l-1.5 1.5a1.5 1.5 0 01-2.12 0l-.38-.38a1.5 1.5 0 00-2.12 0l-1.5 1.5a1.5 1.5 0 000 2.12l.38.38a1.5 1.5 0 010 2.12l-1.5 1.5a1.5 1.5 0 000 2.12l1.5 1.5a1.5 1.5 0 010 2.12l-.38.38a1.5 1.5 0 000 2.12l1.5 1.5a1.5 1.5 0 002.12 0l.38-.38a1.5 1.5 0 012.12 0l1.5 1.5a1.5 1.5 0 002.12 0l1.5-1.5a1.5 1.5 0 010-2.12l.38-.38a1.5 1.5 0 000-2.12l1.5-1.5a1.5 1.5 0 000-2.12l-1.5-1.5a1.5 1.5 0 010-2.12l-.38-.38a1.5 1.5 0 000-2.12l-1.5-1.5a1.5 1.5 0 00-2.12 0l-.38.38a1.5 1.5 0 01-2.12 0l-1.5-1.5z",
   CHECK: "M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z",
   PLUS: "M12 5.25a.75.75 0 01.75.75v5.25H18a.75.75 0 010 1.5h-5.25V18a.75.75 0 01-1.5 0v-5.25H6a.75.75 0 010-1.5h5.25V6a.75.75 0 01.75-.75z",
+  SEARCH: "M15.504 13.996l4.996 4.996-1.504 1.504-4.996-4.996a7.5 7.5 0 111.504-1.504zM10.5 16.5a6 6 0 100-12 6 6 0 000 12z",
 };
 
 const LoadingSpinner = ({ size = 'h-5 w-5' }) => (
@@ -50,16 +51,20 @@ export default function App() {
   const [auth, setAuth] = useState(null);
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [activeTab, setActiveTab] = useState('to-watch');
+  const [activeTab, setActiveTab] = useState('search'); // search, to-watch, watched
   const [processingIds, setProcessingIds] = useState(new Set());
 
   const [movies, setMovies] = useState([]);
-  const [newMovie, setNewMovie] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [aiAnalysis, setAiAnalysis] = useState(null);
   
   const analysisRef = useRef(null);
+  const searchTimeoutRef = useRef(null);
 
   // --- Firebase Initialization and Auth ---
   useEffect(() => {
@@ -118,20 +123,13 @@ export default function App() {
     return () => unsubscribe();
   }, [db, userId, isAuthReady]);
 
-  // --- OMDb API Call for Movie Details ---
+  // --- OMDb API Calls ---
   const getMovieDetails = async (movieTitle) => {
     const OMDB_API_KEY = process.env.REACT_APP_OMDB_API_KEY;
-
-    if (!OMDB_API_KEY) {
-        console.error("OMDb API key is missing.");
-        return { posterUrl: null, description: "OMDb API key not configured." };
-    }
-
+    if (!OMDB_API_KEY) return { posterUrl: null, description: "OMDb API key not configured." };
     const searchUrl = `https://www.omdbapi.com/?t=${encodeURIComponent(movieTitle)}&apikey=${OMDB_API_KEY}`;
-    
     const response = await fetch(searchUrl);
     if (!response.ok) throw new Error('Failed to fetch from OMDb');
-    
     const data = await response.json();
     if (data.Response === "True") {
         const posterUrl = data.Poster !== "N/A" ? data.Poster : null;
@@ -139,6 +137,45 @@ export default function App() {
     }
     return { posterUrl: null, description: 'No details found.' };
   };
+
+  const handleSearch = async (query) => {
+    if (!query || query.length < 3) {
+        setSearchResults([]);
+        return;
+    }
+    setIsSearching(true);
+    const OMDB_API_KEY = process.env.REACT_APP_OMDB_API_KEY;
+    if (!OMDB_API_KEY) {
+        setError("OMDb API key not configured.");
+        setIsSearching(false);
+        return;
+    }
+    const searchUrl = `https://www.omdbapi.com/?s=${encodeURIComponent(query)}&apikey=${OMDB_API_KEY}`;
+    try {
+        const response = await fetch(searchUrl);
+        const data = await response.json();
+        if (data.Response === "True") {
+            setSearchResults(data.Search);
+        } else {
+            setSearchResults([]);
+        }
+    } catch (err) {
+        console.error("Error searching OMDb:", err);
+        setError("Failed to fetch search results.");
+    } finally {
+        setIsSearching(false);
+    }
+  };
+
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+    }
+    searchTimeoutRef.current = setTimeout(() => {
+        handleSearch(searchQuery);
+    }, 500); // Debounce search by 500ms
+    return () => clearTimeout(searchTimeoutRef.current);
+  }, [searchQuery]);
 
   const triggerDetailFetch = async (movieId, movieTitle) => {
     setProcessingIds(prev => new Set(prev).add(movieId));
@@ -161,18 +198,14 @@ export default function App() {
     }
   };
 
-
   // --- Firestore Actions ---
-  const handleAddMovie = async (e, title = newMovie, watched = false) => {
-    if (e) e.preventDefault();
+  const handleAddMovie = async (title, watched = false) => {
     if (!title.trim() || !db || !userId) return;
-
     if (movies.some(movie => movie.title.toLowerCase() === title.toLowerCase())) {
         setError(`"${title}" is already in your list.`);
         setTimeout(() => setError(null), 3000);
         return;
     }
-
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const moviesCollectionPath = `artifacts/${appId}/users/${userId}/movies`;
     try {
@@ -181,7 +214,6 @@ export default function App() {
         watched,
         createdAt: serverTimestamp() 
       });
-      if (e) setNewMovie('');
       if (watched) {
         triggerDetailFetch(docRef.id, title.trim());
       }
@@ -202,9 +234,7 @@ export default function App() {
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const movieDocPath = `artifacts/${appId}/users/${userId}/movies/${id}`;
     const movieIsNowWatched = !currentStatus;
-    
     await updateDoc(doc(db, movieDocPath), { watched: movieIsNowWatched });
-
     if (movieIsNowWatched) {
         const movie = movies.find(m => m.id === id);
         if (movie && !movie.description && !movie.posterUrl) {
@@ -226,7 +256,7 @@ export default function App() {
     const movieList = watchedMovies.map(m => m.title).join(', ');
     const prompt = `As a film expert, analyze this list of watched movies: ${movieList}. Based on this list, generate a response in a valid JSON format. The JSON object must contain three keys: 1) 'title': a creative, personalized title for the user (e.g., 'The Action Aficionado'). 2) 'suggestion': a brief, one-sentence summary of their taste and a suggestion. 3) 'recommendations': an array of exactly 3 movie titles they might enjoy.`;
 
-    const apiKey = process.env.REACT_APP_GEMINI_API_KEY || ""; // Use environment variable
+    const apiKey = process.env.REACT_APP_GEMINI_API_KEY || "";
     if (!apiKey) {
         setError("Gemini API key is not configured.");
         setIsLoading(false);
@@ -269,7 +299,11 @@ export default function App() {
     }
   };
 
-  const moviesToDisplay = movies.filter(movie => activeTab === 'to-watch' ? !movie.watched : movie.watched);
+  const moviesToDisplay = movies.filter(movie => {
+    if (activeTab === 'to-watch') return !movie.watched;
+    if (activeTab === 'watched') return movie.watched;
+    return false;
+  });
   const watchedMoviesForAnalysis = movies.filter(m => m.watched);
 
   // --- Rendered JSX ---
@@ -281,25 +315,46 @@ export default function App() {
           <h1 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-600">
             AI Movie Curator
           </h1>
-          <p className="text-gray-400 mt-2">Build your watchlist, mark what you've seen, and get personalized AI-driven recommendations.</p>
+          <p className="text-gray-400 mt-2">Search for movies, build your lists, and get personalized AI-driven recommendations.</p>
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left Column: Watchlist & Watched */}
+          {/* Left Column: Search & Lists */}
           <div className="bg-gray-800/50 rounded-xl shadow-lg p-6 backdrop-blur-sm border border-gray-700 flex flex-col">
-            <h2 className="text-2xl font-semibold mb-4 text-indigo-400">Manage Your Movies</h2>
-            <form onSubmit={handleAddMovie} className="flex gap-2 mb-4">
-              <input type="text" value={newMovie} onChange={(e) => setNewMovie(e.target.value)} placeholder="Add a movie title..." className="flex-grow bg-gray-700 text-white rounded-md px-4 py-2 border border-gray-600 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition" disabled={!isAuthReady} />
-              <button type="submit" className="bg-indigo-600 text-white font-bold py-2 px-4 rounded-md hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition">Add</button>
-            </form>
+            <div className="relative mb-4">
+                <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search for a movie title..." className="w-full bg-gray-700 text-white rounded-md pl-10 pr-4 py-3 border border-gray-600 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition" />
+                <Icon path={ICONS.SEARCH} className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2"/>
+            </div>
             
             <div className="flex border-b border-gray-700 mb-4">
+                <button onClick={() => setActiveTab('search')} className={`py-2 px-4 font-semibold transition ${activeTab === 'search' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-gray-400'}`}>Search Results</button>
                 <button onClick={() => setActiveTab('to-watch')} className={`py-2 px-4 font-semibold transition ${activeTab === 'to-watch' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-gray-400'}`}>To Watch</button>
                 <button onClick={() => setActiveTab('watched')} className={`py-2 px-4 font-semibold transition ${activeTab === 'watched' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-gray-400'}`}>Watched</button>
             </div>
 
             <div className="flex-grow h-96 overflow-y-auto pr-2">
-                {activeTab === 'to-watch' ? (
+                {activeTab === 'search' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        {isSearching ? <div className="col-span-full flex justify-center items-center h-full"><LoadingSpinner/></div> :
+                         searchResults.length > 0 ? searchResults.map(movie => (
+                            <div key={movie.imdbID} className="bg-gray-700/60 rounded-lg overflow-hidden animate-fade-in">
+                                <div className="aspect-w-2 aspect-h-3 bg-gray-800 flex items-center justify-center">
+                                    {movie.Poster !== "N/A" ? <img src={movie.Poster} alt={movie.Title} className="w-full h-full object-cover"/> : <Icon path={ICONS.FILM} className="w-10 h-10 text-gray-600"/>}
+                                </div>
+                                <div className="p-2">
+                                    <h4 className="font-bold text-sm truncate">{movie.Title}</h4>
+                                    <p className="text-xs text-gray-400">{movie.Year}</p>
+                                    <div className="flex flex-col gap-1 mt-2">
+                                        <button onClick={() => handleAddMovie(movie.Title, true)} className="text-xs bg-green-600 text-white font-semibold py-1 px-1 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1"><Icon path={ICONS.CHECK} className="w-3 h-3"/> Watched</button>
+                                        <button onClick={() => handleAddMovie(movie.Title, false)} className="text-xs bg-indigo-600 text-white font-semibold py-1 px-1 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1"><Icon path={ICONS.PLUS} className="w-3 h-3"/> To Watch</button>
+                                    </div>
+                                </div>
+                            </div>
+                         )) : <div className="col-span-full text-center text-gray-500 pt-32">Search for movies to add them to your lists.</div>
+                        }
+                    </div>
+                )}
+                {activeTab === 'to-watch' && (
                     <div className="space-y-2">
                         {moviesToDisplay.length > 0 ? moviesToDisplay.map(movie => (
                             <div key={movie.id} className="flex items-center justify-between bg-gray-700/80 p-3 rounded-lg animate-fade-in">
@@ -311,7 +366,8 @@ export default function App() {
                             </div>
                         )) : <div className="text-center text-gray-500 pt-32">Your watchlist is empty!</div>}
                     </div>
-                ) : (
+                )}
+                {activeTab === 'watched' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                         {moviesToDisplay.length > 0 ? moviesToDisplay.map(movie => (
                             <div key={movie.id} className="bg-gray-700/60 rounded-lg overflow-hidden animate-fade-in group relative">
@@ -338,9 +394,6 @@ export default function App() {
 
           {/* Right Column: AI Analysis */}
           <div className="bg-gray-800/50 rounded-xl shadow-lg p-6 backdrop-blur-sm border border-gray-700" ref={analysisRef}>
-            <h2 className="text-2xl font-semibold mb-4 text-purple-400">AI Curator's Analysis</h2>
-            {error && <div className="p-3 mb-4 text-sm text-red-300 rounded-lg bg-red-900/50 border border-red-500/50">{error}</div>}
-            
             {aiAnalysis ? (
               <div className="space-y-6 animate-fade-in">
                 <div>
@@ -362,11 +415,11 @@ export default function App() {
                         <div className="p-3">
                             <h4 className="font-bold text-white truncate">{rec.title}</h4>
                             <p className="text-xs text-gray-400 h-16 overflow-hidden mt-1">{rec.description}</p>
-                            <div className="flex gap-2 mt-3">
-                                <button onClick={() => handleAddMovie(null, rec.title, true)} className="flex-1 text-xs bg-green-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1">
+                            <div className="flex flex-col gap-2 mt-3">
+                                <button onClick={() => handleAddMovie(rec.title, true)} className="text-xs bg-green-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-green-500 transition flex items-center justify-center gap-1">
                                     <Icon path={ICONS.CHECK} className="w-4 h-4"/> Watched
                                 </button>
-                                <button onClick={() => handleAddMovie(null, rec.title, false)} className="flex-1 text-xs bg-indigo-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1">
+                                <button onClick={() => handleAddMovie(rec.title, false)} className="text-xs bg-indigo-600 text-white font-semibold py-2 px-2 rounded-md hover:bg-indigo-500 transition flex items-center justify-center gap-1">
                                     <Icon path={ICONS.PLUS} className="w-4 h-4"/> Add to List
                                 </button>
                             </div>
